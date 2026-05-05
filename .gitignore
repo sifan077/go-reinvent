@@ -1,0 +1,35 @@
+# D:\code\go-reinvent\.gitignore
+
+# Go build artifacts
+*.exe
+*.out
+*.o
+*.a
+
+# Go module files
+go.sum
+
+# IDE/editor directories
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Log files
+*.log
+app.log
+
+# Test coverage
+coverage.out
+cover.out
+
+# Temporary files
+tmp/
+temp/
+*.tmp
