@@ -17,10 +17,10 @@ func main() {
 	f, _ := os.Create("app.log")
 	defer f.Close()
 	fileLog := logger.New(
-		logger.WithOutput(f),         // 输出到文件
-		logger.WithColorful(false),   // 文件不需要 ANSI 颜色码
+		logger.WithOutput(f),          // 输出到文件
+		logger.WithColorful(false),    // 文件不需要 ANSI 颜色码
 		logger.WithLevel(logger.INFO), // 只记录 INFO 及以上
-		logger.WithCaller(true),      // 显示文件名:行号
+		logger.WithCaller(true),       // 显示文件名:行号
 	)
 	fileLog.Info("this goes to file without color codes")
 	fileLog.Debugf("this will not appear (below INFO)")
