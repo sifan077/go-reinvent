@@ -1,6 +1,12 @@
 package cache
 
-import "testing"
+import (
+	"sync"
+	"testing"
+	"time"
+)
+
+// --- 阶段一基础测试 ---
 
 func TestBasicPutGet(t *testing.T) {
 	c := New[string, int](3)
@@ -151,7 +157,6 @@ func TestNegativeCapacityPanics(t *testing.T) {
 
 func TestEvictionOrder(t *testing.T) {
 	c := New[int, int](3)
-	// 依次写入 1,2,3,4,5，验证淘汰顺序
 	c.Put(1, 10)
 	c.Put(2, 20)
 	c.Put(3, 30)
@@ -186,4 +191,218 @@ func TestLen(t *testing.T) {
 	if c.Len() != 1 {
 		t.Fatalf("after Remove Len() = %d, want 1", c.Len())
 	}
+}
+
+// --- 阶段二：并发安全测试 ---
+
+func TestConcurrentPutGet(t *testing.T) {
+	c := New[int, int](100)
+	var wg sync.WaitGroup
+
+	// 50 个 goroutine 并发写入
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			c.Put(n, n*10)
+		}(i)
+	}
+	wg.Wait()
+
+	// 50 个 goroutine 并发读取
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			c.Get(n)
+		}(i)
+	}
+	wg.Wait()
+}
+
+func TestConcurrentPutGetLarge(t *testing.T) {
+	c := New[string, int](50)
+	var wg sync.WaitGroup
+
+	// 100 个 goroutine 混合读写
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			key := string(rune('A' + n%26))
+			c.Put(key, n)
+			c.Get(key)
+			c.Peek(key)
+			c.Remove(key)
+			c.Len()
+		}(i)
+	}
+	wg.Wait()
+}
+
+func TestConcurrentLen(t *testing.T) {
+	c := New[int, int](10)
+	var wg sync.WaitGroup
+
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			c.Put(n, n)
+			_ = c.Len()
+		}(i)
+	}
+	wg.Wait()
+
+	// 容量为 10，最终 Len 应该是 10
+	if c.Len() != 10 {
+		t.Fatalf("Len() = %d, want 10", c.Len())
+	}
+}
+
+// --- 阶段二：TTL 过期测试 ---
+
+func TestTTLExpired(t *testing.T) {
+	c := New[string, int](10)
+	c.Put("short", 1, 50*time.Millisecond)
+	c.Put("long", 2, 5*time.Second)
+
+	// 立即查找，都应命中
+	if v, ok := c.Get("short"); !ok || v != 1 {
+		t.Fatalf("Get('short') immediately = %v, %v, want 1, true", v, ok)
+	}
+
+	// 等待过期
+	time.Sleep(100 * time.Millisecond)
+
+	// short 应过期
+	if _, ok := c.Get("short"); ok {
+		t.Fatal("key 'short' should have expired")
+	}
+	// long 应仍在
+	if v, ok := c.Get("long"); !ok || v != 2 {
+		t.Fatalf("Get('long') = %v, %v, want 2, true", v, ok)
+	}
+}
+
+func TestTTLPeekExpired(t *testing.T) {
+	c := New[string, int](10)
+	c.Put("k", 42, 50*time.Millisecond)
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Peek 也应检测过期并删除
+	if _, ok := c.Peek("k"); ok {
+		t.Fatal("Peek('k') should return false after expiration")
+	}
+	// 确认已从缓存中删除
+	if c.Len() != 0 {
+		t.Fatalf("Len() = %d, want 0 (expired key should be removed)", c.Len())
+	}
+}
+
+func TestTTLZeroMeansNoExpiry(t *testing.T) {
+	c := New[string, int](10)
+	c.Put("forever", 99) // 不传 TTL，零值表示永不过期
+
+	time.Sleep(50 * time.Millisecond)
+
+	if v, ok := c.Get("forever"); !ok || v != 99 {
+		t.Fatalf("Get('forever') = %v, %v, want 99, true", v, ok)
+	}
+}
+
+func TestGlobalTTL(t *testing.T) {
+	c := New[string, int](10, WithTTL(50*time.Millisecond))
+	c.Put("a", 1)
+
+	time.Sleep(100 * time.Millisecond)
+
+	if _, ok := c.Get("a"); ok {
+		t.Fatal("key 'a' should have expired via global TTL")
+	}
+}
+
+func TestPerKeyTTLOverridesGlobal(t *testing.T) {
+	c := New[string, int](10, WithTTL(50*time.Millisecond))
+	c.Put("short", 1)             // 使用全局 TTL 50ms
+	c.Put("long", 2, 5*time.Second) // 覆盖为 5s
+
+	time.Sleep(100 * time.Millisecond)
+
+	if _, ok := c.Get("short"); ok {
+		t.Fatal("key 'short' should have expired via global TTL")
+	}
+	if v, ok := c.Get("long"); !ok || v != 2 {
+		t.Fatalf("Get('long') = %v, %v, want 2, true (custom TTL should override)", v, ok)
+	}
+}
+
+func TestTTLUpdateRefreshesExpiry(t *testing.T) {
+	c := New[string, int](10)
+	c.Put("k", 1, 50*time.Millisecond)
+
+	time.Sleep(30 * time.Millisecond)
+	c.Put("k", 2, 50*time.Millisecond) // 重新设置，刷新过期时间
+
+	time.Sleep(30 * time.Millisecond) // 总共 60ms，但第一次的 50ms 已过
+	// 因为 Put 刷新了过期时间，应该还在
+	if v, ok := c.Get("k"); !ok || v != 2 {
+		t.Fatalf("Get('k') = %v, %v, want 2, true (TTL should be refreshed)", v, ok)
+	}
+}
+
+func TestTTLLenCorrectAfterExpiry(t *testing.T) {
+	c := New[string, int](10)
+	c.Put("a", 1, 50*time.Millisecond)
+	c.Put("b", 2, 50*time.Millisecond)
+	c.Put("c", 3) // 永不过期
+
+	if c.Len() != 3 {
+		t.Fatalf("Len() = %d, want 3", c.Len())
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	// a, b 过期但还没被访问，Len 仍为 3（惰性删除）
+	if c.Len() != 3 {
+		t.Fatalf("Len() before access = %d, want 3 (lazy deletion)", c.Len())
+	}
+
+	// 访问触发惰性删除
+	c.Get("a")
+	c.Get("b")
+
+	if c.Len() != 1 {
+		t.Fatalf("Len() after access = %d, want 1", c.Len())
+	}
+}
+
+func TestConcurrentTTL(t *testing.T) {
+	c := New[int, int](100, WithTTL(50*time.Millisecond))
+	var wg sync.WaitGroup
+
+	// 并发写入带 TTL 的 key
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			c.Put(n, n)
+		}(i)
+	}
+	wg.Wait()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// 并发读取，应全部过期
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			if _, ok := c.Get(n); ok {
+				t.Errorf("key %d should have expired", n)
+			}
+		}(i)
+	}
+	wg.Wait()
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"time"
 
 	"go-reinvent/pkg/cache"
 )
@@ -48,6 +49,27 @@ func main() {
 		} else {
 			fmt.Printf("  Get(%d) = 未命中\n", k)
 		}
+	}
+
+	// 演示 TTL 过期
+	fmt.Println("\n=== TTL 过期演示 ===")
+	tc := cache.New[string, string](10, cache.WithTTL(100*time.Millisecond))
+	tc.Put("token", "abc123")
+	tc.Put("session", "xyz789", 200*time.Millisecond) // 自定义 TTL
+
+	fmt.Println("  写入 token(TTL=100ms) 和 session(TTL=200ms)")
+	if v, ok := tc.Peek("token"); ok {
+		fmt.Printf("  Peek(token) = %s\n", v)
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	fmt.Println("  等待 150ms...")
+
+	if _, ok := tc.Peek("token"); !ok {
+		fmt.Println("  Peek(token) = 已过期")
+	}
+	if v, ok := tc.Peek("session"); ok {
+		fmt.Printf("  Peek(session) = %s（自定义 TTL，尚未过期）\n", v)
 	}
 }
 
