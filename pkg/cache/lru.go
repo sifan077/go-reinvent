@@ -27,6 +27,8 @@ type LRU[K comparable, V any] struct {
 	tail     *entry[K, V]       // 哨兵尾，tail.prev 才是最久未使用的节点
 	size     int
 	ttl      time.Duration      // 全局默认 TTL
+	onEvict  EvictCallback[K, V] // 淘汰回调
+	stats    stats               // 访问统计（原子计数器）
 }
 
 // New 创建一个指定容量的 LRU 缓存。capacity 必须大于 0。
@@ -42,6 +44,9 @@ func New[K comparable, V any](capacity int, opts ...Option) *LRU[K, V] {
 		tail:     &entry[K, V]{},
 		ttl:      cfg.ttl,
 	}
+	if cb, ok := cfg.onEvict.(EvictCallback[K, V]); ok {
+		c.onEvict = cb
+	}
 	c.head.next = c.tail
 	c.tail.prev = c.head
 	return c
@@ -54,17 +59,23 @@ func (c *LRU[K, V]) Peek(key K) (V, bool) {
 
 	e, ok := c.cache[key]
 	if !ok {
+		c.stats.misses.Add(1)
 		var zero V
 		return zero, false
 	}
 	// 检查是否过期
 	if !e.expiresAt.IsZero() && time.Now().After(e.expiresAt) {
+		v := e.value
 		c.removeElement(e)
 		delete(c.cache, e.key)
 		c.size--
+		c.stats.misses.Add(1)
+		c.stats.expirations.Add(1)
+		c.fireEvict(key, v, EvictReasonExpired)
 		var zero V
 		return zero, false
 	}
+	c.stats.hits.Add(1)
 	return e.value, true
 }
 
@@ -76,17 +87,23 @@ func (c *LRU[K, V]) Get(key K) (V, bool) {
 
 	e, ok := c.cache[key]
 	if !ok {
+		c.stats.misses.Add(1)
 		var zero V
 		return zero, false
 	}
 	// 检查是否过期
 	if !e.expiresAt.IsZero() && time.Now().After(e.expiresAt) {
+		v := e.value
 		c.removeElement(e)
 		delete(c.cache, e.key)
 		c.size--
+		c.stats.misses.Add(1)
+		c.stats.expirations.Add(1)
+		c.fireEvict(key, v, EvictReasonExpired)
 		var zero V
 		return zero, false
 	}
+	c.stats.hits.Add(1)
 	c.moveToFront(e)
 	return e.value, true
 }
@@ -137,6 +154,8 @@ func (c *LRU[K, V]) Remove(key K) bool {
 	c.removeElement(e)
 	delete(c.cache, e.key)
 	c.size--
+	c.stats.removals.Add(1)
+	c.fireEvict(key, e.value, EvictReasonRemoved)
 	return true
 }
 
@@ -181,10 +200,29 @@ func (c *LRU[K, V]) moveToFront(e *entry[K, V]) {
 	c.pushFront(e)
 }
 
+// Stats 返回缓存访问统计快照。
+func (c *LRU[K, V]) Stats() Stats {
+	return c.stats.snapshot()
+}
+
+// ResetStats 重置所有访问统计计数器。
+func (c *LRU[K, V]) ResetStats() {
+	c.stats.reset()
+}
+
+// fireEvict 触发淘汰回调（调用方需持有锁）。
+func (c *LRU[K, V]) fireEvict(key K, value V, reason EvictReason) {
+	if c.onEvict != nil {
+		c.onEvict(key, value, reason)
+	}
+}
+
 // removeOldest 删除链表尾部节点（最久未使用），并从哈希表中删除对应 key。
 func (c *LRU[K, V]) removeOldest() {
 	victim := c.tail.prev
 	c.removeElement(victim)
 	delete(c.cache, victim.key)
 	c.size--
+	c.stats.evictions.Add(1)
+	c.fireEvict(victim.key, victim.value, EvictReasonCapacity)
 }

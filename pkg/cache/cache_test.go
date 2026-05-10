@@ -406,3 +406,173 @@ func TestConcurrentTTL(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// --- Phase 3: 淘汰回调 + 访问统计 ---
+
+func TestEvictCallbackCapacity(t *testing.T) {
+	type evictRecord struct {
+		key    int
+		value  int
+		reason EvictReason
+	}
+	var records []evictRecord
+
+	c := New[int, int](2, WithOnEvict(func(key, value int, reason EvictReason) {
+		records = append(records, evictRecord{key, value, reason})
+	}))
+
+	c.Put(1, 10)
+	c.Put(2, 20)
+	c.Put(3, 30) // 触发淘汰 key=1
+
+	if len(records) != 1 {
+		t.Fatalf("expected 1 eviction, got %d", len(records))
+	}
+	if records[0].key != 1 || records[0].value != 10 {
+		t.Errorf("expected evicted key=1 value=10, got key=%d value=%d", records[0].key, records[0].value)
+	}
+	if records[0].reason != EvictReasonCapacity {
+		t.Errorf("expected reason=Capacity, got %v", records[0].reason)
+	}
+}
+
+func TestEvictCallbackExpired(t *testing.T) {
+	type evictRecord struct {
+		key    string
+		value  string
+		reason EvictReason
+	}
+	var records []evictRecord
+
+	c := New[string, string](10, WithOnEvict(func(key, value string, reason EvictReason) {
+		records = append(records, evictRecord{key, value, reason})
+	}))
+
+	c.Put("k1", "v1", 50*time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
+
+	// Get 触发惰性删除
+	c.Get("k1")
+
+	if len(records) != 1 {
+		t.Fatalf("expected 1 eviction, got %d", len(records))
+	}
+	if records[0].key != "k1" || records[0].value != "v1" {
+		t.Errorf("expected evicted key=k1 value=v1, got key=%s value=%s", records[0].key, records[0].value)
+	}
+	if records[0].reason != EvictReasonExpired {
+		t.Errorf("expected reason=Expired, got %v", records[0].reason)
+	}
+}
+
+func TestEvictCallbackRemoved(t *testing.T) {
+	type evictRecord struct {
+		key    int
+		value  int
+		reason EvictReason
+	}
+	var records []evictRecord
+
+	c := New[int, int](10, WithOnEvict(func(key, value int, reason EvictReason) {
+		records = append(records, evictRecord{key, value, reason})
+	}))
+
+	c.Put(42, 100)
+	c.Remove(42)
+
+	if len(records) != 1 {
+		t.Fatalf("expected 1 eviction, got %d", len(records))
+	}
+	if records[0].key != 42 || records[0].value != 100 {
+		t.Errorf("expected evicted key=42 value=100, got key=%d value=%d", records[0].key, records[0].value)
+	}
+	if records[0].reason != EvictReasonRemoved {
+		t.Errorf("expected reason=Removed, got %v", records[0].reason)
+	}
+}
+
+func TestStatsHitRate(t *testing.T) {
+	c := New[string, int](10)
+
+	c.Put("a", 1)
+	c.Put("b", 2)
+
+	// 2 hits
+	c.Get("a")
+	c.Peek("b")
+
+	// 2 misses (1 not found + 1 expired)
+	c.Get("c")
+	c.Put("d", 4, 10*time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
+	c.Get("d") // expired → miss
+
+	s := c.Stats()
+	if s.Hits != 2 {
+		t.Errorf("expected Hits=2, got %d", s.Hits)
+	}
+	if s.Misses != 2 {
+		t.Errorf("expected Misses=2, got %d", s.Misses)
+	}
+	if s.Expirations != 1 {
+		t.Errorf("expected Expirations=1, got %d", s.Expirations)
+	}
+
+	hr := s.HitRate()
+	if hr < 0.49 || hr > 0.51 {
+		t.Errorf("expected HitRate≈0.5, got %f", hr)
+	}
+}
+
+func TestStatsReset(t *testing.T) {
+	c := New[int, int](10)
+
+	c.Put(1, 1)
+	c.Get(1)  // hit
+	c.Get(2)  // miss
+	c.Remove(1)
+
+	s := c.Stats()
+	if s.Hits != 1 || s.Misses != 1 || s.Removals != 1 {
+		t.Fatalf("before reset: unexpected stats %+v", s)
+	}
+
+	c.ResetStats()
+	s = c.Stats()
+	if s.Hits != 0 || s.Misses != 0 || s.Evictions != 0 || s.Expirations != 0 || s.Removals != 0 {
+		t.Errorf("after reset: expected all zeros, got %+v", s)
+	}
+}
+
+func TestStatsConcurrency(t *testing.T) {
+	c := New[int, int](50)
+	var wg sync.WaitGroup
+
+	// 50 goroutine 写入
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			c.Put(n, n)
+		}(i)
+	}
+	wg.Wait()
+
+	// 100 goroutine 混合读写 + 读统计
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			c.Get(n)
+			c.Get(n + 100) // miss
+			c.Stats()
+		}(i)
+	}
+	wg.Wait()
+
+	s := c.Stats()
+	total := s.Hits + s.Misses
+	if total != 200 {
+		t.Errorf("expected total accesses=200, got %d (hits=%d, misses=%d)", total, s.Hits, s.Misses)
+	}
+}

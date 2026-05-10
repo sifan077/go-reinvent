@@ -71,6 +71,40 @@ func main() {
 	if v, ok := tc.Peek("session"); ok {
 		fmt.Printf("  Peek(session) = %s（自定义 TTL，尚未过期）\n", v)
 	}
+
+	// 演示淘汰回调
+	fmt.Println("\n=== 淘汰回调演示 ===")
+	evictions := 0
+	sc := cache.New[string, string](2, cache.WithOnEvict(func(key, value string, reason cache.EvictReason) {
+		evictions++
+		fmt.Printf("  [回调] key=%s value=%s reason=%s\n", key, value, reason)
+	}))
+	sc.Put("a", "1")
+	sc.Put("b", "2")
+	sc.Put("c", "3") // 容量淘汰 a
+	sc.Remove("b")   // 手动删除
+	fmt.Printf("  共触发 %d 次淘汰回调\n", evictions)
+
+	// 演示访问统计
+	fmt.Println("\n=== 访问统计演示 ===")
+	pc := cache.New[string, int](10, cache.WithTTL(100*time.Millisecond))
+	pc.Put("x", 100)
+	pc.Put("y", 200)
+	pc.Put("z", 300, 50*time.Millisecond)
+
+	pc.Get("x") // hit
+	pc.Get("y") // hit
+	pc.Get("w") // miss
+	time.Sleep(80 * time.Millisecond)
+	pc.Get("z") // expired → miss
+
+	s := pc.Stats()
+	fmt.Printf("  Hits=%d Misses=%d Expirations=%d HitRate=%.0f%%\n",
+		s.Hits, s.Misses, s.Expirations, s.HitRate()*100)
+
+	pc.ResetStats()
+	s = pc.Stats()
+	fmt.Printf("  ResetStats 后: Hits=%d Misses=%d\n", s.Hits, s.Misses)
 }
 
 func printCache(c *cache.LRU[string, string], label string) {
