@@ -29,6 +29,7 @@ type LRU[K comparable, V any] struct {
 	ttl      time.Duration       // 全局默认 TTL
 	onEvict  EvictCallback[K, V] // 淘汰回调
 	stats    stats               // 访问统计（原子计数器）
+	janitor  *Janitor[K, V]      // 后台清理 goroutine
 }
 
 // New 创建一个指定容量的 LRU 缓存。capacity 必须大于 0。
@@ -49,6 +50,13 @@ func New[K comparable, V any](capacity int, opts ...Option) *LRU[K, V] {
 	}
 	c.head.next = c.tail
 	c.tail.prev = c.head
+
+	// 启动后台清理 goroutine（如果配置了 janitor 间隔）
+	if cfg.janitorInterval > 0 {
+		c.janitor = newJanitor[K, V](cfg.janitorInterval, cfg.janitorSamples)
+		c.janitor.start(c)
+	}
+
 	return c
 }
 
@@ -225,4 +233,14 @@ func (c *LRU[K, V]) removeOldest() {
 	c.size--
 	c.stats.evictions.Add(1)
 	c.fireEvict(victim.key, victim.value, EvictReasonCapacity)
+}
+
+// Close 关闭缓存，停止后台清理 goroutine。
+// 关闭后缓存仍可正常读写，但不再主动清理过期 key。
+func (c *LRU[K, V]) Close() error {
+	if c.janitor != nil {
+		c.janitor.stopCleanup()
+		c.janitor = nil
+	}
+	return nil
 }

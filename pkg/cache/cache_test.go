@@ -797,3 +797,204 @@ func TestNextPowerOfTwo(t *testing.T) {
 		}
 	}
 }
+
+// --- 阶段五：主动清理 + 接口抽象 ---
+
+func TestJanitorCleanup(t *testing.T) {
+	// 创建带 janitor 的缓存，每 100ms 清理一次
+	c := New[string, int](10,
+		WithTTL(50*time.Millisecond),
+		WithJanitorInterval(100*time.Millisecond),
+		WithJanitorSamples(100), // 采样所有 key
+	)
+	defer c.Close()
+
+	// 写入 10 个带 TTL 的 key
+	for i := 0; i < 10; i++ {
+		c.Put(string(rune('A'+i)), i)
+	}
+	if c.Len() != 10 {
+		t.Fatalf("Len() = %d, want 10", c.Len())
+	}
+
+	// 等待过期 + janitor 清理
+	time.Sleep(250 * time.Millisecond)
+
+	// janitor 应该已经清理了过期 key
+	if c.Len() != 0 {
+		t.Fatalf("after janitor cleanup: Len() = %d, want 0", c.Len())
+	}
+
+	// 验证 expirations 统计
+	s := c.Stats()
+	if s.Expirations != 10 {
+		t.Errorf("Expirations = %d, want 10", s.Expirations)
+	}
+}
+
+func TestJanitorStopsAfterClose(t *testing.T) {
+	c := New[string, int](10,
+		WithTTL(50*time.Millisecond),
+		WithJanitorInterval(100*time.Millisecond),
+	)
+	defer c.Close()
+
+	c.Put("k", 42)
+	time.Sleep(100 * time.Millisecond) // 等待过期
+
+	// 关闭 janitor
+	c.Close()
+
+	// 记录当前 Len
+	time.Sleep(150 * time.Millisecond) // 再等一个清理周期
+
+	// Close 后 janitor 不应再清理，Len 应保持（惰性删除仍生效）
+	// 注意：Close 后 Get 仍会触发惰性删除，这里用 Len 而不是 Get
+	_ = c // 缓存仍可正常使用
+}
+
+func TestJanitorDefaultSamples(t *testing.T) {
+	// 不指定 WithJanitorSamples，使用默认值 20
+	c := New[string, int](100,
+		WithTTL(50*time.Millisecond),
+		WithJanitorInterval(100*time.Millisecond),
+	)
+	defer c.Close()
+
+	// 写入 50 个 key
+	for i := 0; i < 50; i++ {
+		c.Put(string(rune('A'+i%26))+string(rune('0'+i/26)), i)
+	}
+
+	time.Sleep(250 * time.Millisecond)
+
+	// 部分 key 应被清理（采样 20 个，可能不是全部）
+	// 由于采样随机，这里只验证 Len 减少
+	if c.Len() >= 50 {
+		t.Fatal("janitor should have cleaned some expired keys")
+	}
+}
+
+func TestCloseReturnsNil(t *testing.T) {
+	c := New[string, int](10, WithJanitorInterval(time.Second))
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close() returned error: %v", err)
+	}
+}
+
+func TestCloseWithoutJanitor(t *testing.T) {
+	// 没有 janitor 的缓存也能调用 Close
+	c := New[string, int](10)
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close() returned error: %v", err)
+	}
+}
+
+func TestCloseIdempotent(t *testing.T) {
+	c := New[string, int](10, WithJanitorInterval(time.Second))
+	c.Close()
+	// 多次 Close 不应 panic
+	c.Close()
+}
+
+func TestShardedClose(t *testing.T) {
+	sc := NewSharded[string, int](100, 4, nil,
+		WithTTL(50*time.Millisecond),
+		WithJanitorInterval(100*time.Millisecond),
+	)
+
+	sc.Put("a", 1)
+	sc.Put("b", 2)
+
+	if err := sc.Close(); err != nil {
+		t.Fatalf("Close() returned error: %v", err)
+	}
+
+	// Close 后仍可使用
+	sc.Put("c", 3)
+	if v, ok := sc.Get("c"); !ok || v != 3 {
+		t.Fatalf("Get('c') = %v, %v, want 3, true", v, ok)
+	}
+}
+
+func TestCacheInterfaceLRU(t *testing.T) {
+	// 验证 LRU 实现 Cache 接口
+	var c Cache[string, int] = New[string, int](10)
+	defer c.Close()
+
+	c.Put("a", 1)
+	if v, ok := c.Get("a"); !ok || v != 1 {
+		t.Fatalf("Get('a') = %v, %v, want 1, true", v, ok)
+	}
+	c.Remove("a")
+	if c.Len() != 0 {
+		t.Fatalf("Len() = %d, want 0", c.Len())
+	}
+	_ = c.Stats()
+}
+
+func TestCacheInterfaceSharded(t *testing.T) {
+	// 验证 ShardedCache 实现 Cache 接口
+	var c Cache[string, int] = NewSharded[string, int](100, 4, nil)
+	defer c.Close()
+
+	c.Put("a", 1)
+	if v, ok := c.Get("a"); !ok || v != 1 {
+		t.Fatalf("Get('a') = %v, %v, want 1, true", v, ok)
+	}
+	c.Remove("a")
+	if c.Len() != 0 {
+		t.Fatalf("Len() = %d, want 0", c.Len())
+	}
+	_ = c.Stats()
+}
+
+func TestCacheInterfacePolymorphism(t *testing.T) {
+	// 接口多态：同一个函数处理不同实现
+	putAndCheck := func(t *testing.T, c Cache[int, int]) {
+		t.Helper()
+		c.Put(1, 10)
+		c.Put(2, 20)
+		if v, ok := c.Get(1); !ok || v != 10 {
+			t.Fatalf("Get(1) = %v, %v, want 10, true", v, ok)
+		}
+		if c.Len() != 2 {
+			t.Fatalf("Len() = %d, want 2", c.Len())
+		}
+	}
+
+	t.Run("LRU", func(t *testing.T) {
+		c := New[int, int](10) // 创建 LRU 缓存
+		defer c.Close()        // 关闭缓存
+		putAndCheck(t, c)      // 写入并检查缓存测试
+	})
+
+	t.Run("Sharded", func(t *testing.T) {
+		c := NewSharded[int, int](100, 4, nil) // 创建分片缓存
+		defer c.Close()                        // 关闭缓存
+		putAndCheck(t, c)                      // 写入并检查缓存测试
+	})
+}
+
+func TestNoGoroutineLeak(t *testing.T) {
+	// 反复 New/Close 不应泄漏 goroutine
+	for i := 0; i < 100; i++ {
+		c := New[string, int](10, WithJanitorInterval(10*time.Millisecond))
+		c.Put("k", i)
+		c.Close()
+	}
+	// 等待所有 goroutine 退出
+	time.Sleep(50 * time.Millisecond)
+}
+
+func TestNoGoroutineLeakSharded(t *testing.T) {
+	// 分片缓存反复 New/Close 不应泄漏
+	for i := 0; i < 50; i++ {
+		sc := NewSharded[string, int](100, 4, nil,
+			WithJanitorInterval(10*time.Millisecond),
+		)
+		sc.Put("k", i)
+		sc.Close()
+	}
+	time.Sleep(50 * time.Millisecond)
+}

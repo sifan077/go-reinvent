@@ -106,3 +106,13 @@ func nextPowerOfTwo(n int) int {
 	n |= n >> 16
 	return n + 1
 }
+
+// Close 关闭分片缓存，停止所有分片的后台清理 goroutine。
+func (sc *ShardedCache[K, V]) Close() error {
+	for _, s := range sc.shards {
+		if err := s.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}

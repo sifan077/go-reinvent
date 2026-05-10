@@ -122,6 +122,59 @@ func main() {
 	// Stats
 	s2 := sharded.Stats()
 	fmt.Printf("  Stats: Hits=%d Misses=%d Size=%d\n", s2.Hits, s2.Misses, s2.Size)
+
+	// 演示 Janitor 主动清理
+	fmt.Println("\n=== Janitor 主动清理演示 ===")
+	jc := cache.New[string, string](10,
+		cache.WithTTL(100*time.Millisecond),
+		cache.WithJanitorInterval(200*time.Millisecond), // 每 200ms 清理一次
+		cache.WithOnEvict(func(key, value string, reason cache.EvictReason) {
+			fmt.Printf("  [淘汰] key=%s value=%s reason=%s\n", key, value, reason)
+		}),
+	)
+
+	jc.Put("token:1", "abc")
+	jc.Put("token:2", "def")
+	jc.Put("token:3", "ghi")
+	fmt.Printf("  写入 3 个 key（TTL=100ms），Len=%d\n", jc.Len())
+
+	time.Sleep(150 * time.Millisecond)
+	fmt.Println("  等待 150ms... key 已过期但尚未清理")
+	fmt.Printf("  Len=%d（惰性删除：过期 key 仍占位）\n", jc.Len())
+
+	time.Sleep(150 * time.Millisecond) // 等待 janitor 清理周期
+	fmt.Println("  再等待 150ms... janitor 已清理过期 key")
+	fmt.Printf("  Len=%d\n", jc.Len())
+
+	// 关闭 janitor
+	jc.Close()
+	fmt.Println("  Close() 后 janitor 停止，缓存仍可读写")
+	jc.Put("new", "value")
+	fmt.Printf("  Put('new', 'value')，Len=%d\n", jc.Len())
+
+	// 接口多态演示
+	fmt.Println("\n=== 接口多态演示 ===")
+
+	// LRU 实现
+	var ic cache.Cache[string, int] = cache.New[string, int](10)
+	ic.Put("key", 42)
+	fmt.Printf("  LRU: Get('key') = %d\n", mustGetInt(ic.Get("key")))
+	ic.Close()
+
+	// ShardedCache 实现
+	ic = cache.NewSharded[string, int](100, 4, nil)
+	ic.Put("key", 99)
+	fmt.Printf("  Sharded: Get('key') = %d\n", mustGetInt(ic.Get("key")))
+	ic.Close()
+
+	fmt.Println("\n=== 演示结束 ===")
+}
+
+func mustGetInt(v int, ok bool) int {
+	if !ok {
+		return 0
+	}
+	return v
 }
 
 func printCache(c *cache.LRU[string, string], label string) {
