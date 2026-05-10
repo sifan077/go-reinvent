@@ -4,10 +4,12 @@ import "time"
 
 // config 存储缓存的可选配置
 type config struct {
-	ttl     time.Duration // 全局默认 TTL，0 表示永不过期
-	onEvict any           // 淘汰回调，类型为 EvictCallback[K, V]，用 any 避免泛型参数泄漏到 config
-	shards  int           // 分片数，0 表示使用默认值
-	hasher  any           // 自定义哈希函数，类型为 func(K) uint64
+	ttl             time.Duration // 全局默认 TTL，0 表示永不过期
+	onEvict         any           // 淘汰回调，类型为 EvictCallback[K, V]，用 any 避免泛型参数泄漏到 config
+	shards          int           // 分片数，0 表示使用默认值
+	hasher          any           // 自定义哈希函数，类型为 func(K) uint64
+	janitorInterval time.Duration // janitor 清理间隔，0 表示不启动 janitor
+	janitorSamples  int           // janitor 每次采样数量，0 表示使用默认值
 }
 
 // Option 函数式配置项
@@ -41,4 +43,16 @@ func applyOptions(opts ...Option) *config {
 		opt(cfg)
 	}
 	return cfg
+}
+
+// WithJanitorInterval 设置后台清理间隔。传入 0 或不传则不启动 janitor。
+// janitor 会定期采样检查并删除过期 key，避免惰性删除导致内存泄漏。
+func WithJanitorInterval(d time.Duration) Option {
+	return func(c *config) { c.janitorInterval = d }
+}
+
+// WithJanitorSamples 设置 janitor 每次采样检查的 key 数量，默认 20。
+// 采样数量越大，清理越彻底，但每次清理的锁持有时间也越长。
+func WithJanitorSamples(n int) Option {
+	return func(c *config) { c.janitorSamples = n }
 }
