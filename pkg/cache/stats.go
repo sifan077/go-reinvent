@@ -34,6 +34,7 @@ type Stats struct {
 	Evictions   int64 // 容量淘汰次数
 	Expirations int64 // 过期淘汰次数
 	Removals    int64 // 手动删除次数
+	Size        int   // 当前元素数量（ShardedCache 合并统计时填充）
 }
 
 // HitRate 返回命中率 = Hits / (Hits + Misses)，无访问时返回 0。

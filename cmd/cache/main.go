@@ -105,6 +105,23 @@ func main() {
 	pc.ResetStats()
 	s = pc.Stats()
 	fmt.Printf("  ResetStats 后: Hits=%d Misses=%d\n", s.Hits, s.Misses)
+
+	// 演示分片缓存
+	fmt.Println("\n=== 分片缓存演示 ===")
+	sharded := cache.NewSharded[string, string](100, 8, nil,
+		cache.WithTTL(5*time.Minute),
+	)
+	sharded.Put("user:1", "张三")
+	sharded.Put("user:2", "李四")
+	sharded.Put("user:3", "王五")
+	fmt.Printf("  Len=%d\n", sharded.Len())
+	if v, ok := sharded.Get("user:1"); ok {
+		fmt.Printf("  Get(user:1) = %s\n", v)
+	}
+
+	// Stats
+	s2 := sharded.Stats()
+	fmt.Printf("  Stats: Hits=%d Misses=%d Size=%d\n", s2.Hits, s2.Misses, s2.Size)
 }
 
 func printCache(c *cache.LRU[string, string], label string) {
