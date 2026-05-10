@@ -325,7 +325,7 @@ func TestGlobalTTL(t *testing.T) {
 
 func TestPerKeyTTLOverridesGlobal(t *testing.T) {
 	c := New[string, int](10, WithTTL(50*time.Millisecond))
-	c.Put("short", 1)             // 使用全局 TTL 50ms
+	c.Put("short", 1)               // 使用全局 TTL 50ms
 	c.Put("long", 2, 5*time.Second) // 覆盖为 5s
 
 	time.Sleep(100 * time.Millisecond)
@@ -528,8 +528,8 @@ func TestStatsReset(t *testing.T) {
 	c := New[int, int](10)
 
 	c.Put(1, 1)
-	c.Get(1)  // hit
-	c.Get(2)  // miss
+	c.Get(1) // hit
+	c.Get(2) // miss
 	c.Remove(1)
 
 	s := c.Stats()
@@ -574,5 +574,226 @@ func TestStatsConcurrency(t *testing.T) {
 	total := s.Hits + s.Misses
 	if total != 200 {
 		t.Errorf("expected total accesses=200, got %d (hits=%d, misses=%d)", total, s.Hits, s.Misses)
+	}
+}
+
+// --- Phase 4: 分片锁 + 批量操作 ---
+
+func TestShardedBasicPutGet(t *testing.T) {
+	sc := NewSharded[string, int](100, 4, nil)
+	sc.Put("a", 1)
+	sc.Put("b", 2)
+	sc.Put("c", 3)
+
+	if v, ok := sc.Get("a"); !ok || v != 1 {
+		t.Fatalf("Get('a') = %v, %v, want 1, true", v, ok)
+	}
+	if v, ok := sc.Get("b"); !ok || v != 2 {
+		t.Fatalf("Get('b') = %v, %v, want 2, true", v, ok)
+	}
+	if _, ok := sc.Get("x"); ok {
+		t.Fatal("Get('x') should return false")
+	}
+}
+
+func TestShardedEviction(t *testing.T) {
+	// 每个分片容量 1，4 个分片，共 4 个 entry
+	sc := NewSharded[string, int](4, 4, nil)
+
+	// 同一个 key 反复 Put，只占一个分片的一个槽位
+	sc.Put("a", 1)
+	sc.Put("a", 2) // 更新，不增加 size
+
+	if sc.Len() != 1 {
+		t.Fatalf("Len() = %d, want 1", sc.Len())
+	}
+	if v, ok := sc.Get("a"); !ok || v != 2 {
+		t.Fatalf("Get('a') = %v, %v, want 2, true", v, ok)
+	}
+}
+
+func TestShardedLen(t *testing.T) {
+	sc := NewSharded[int, int](100, 4, nil)
+
+	if sc.Len() != 0 {
+		t.Fatalf("empty Len() = %d, want 0", sc.Len())
+	}
+
+	for i := 0; i < 20; i++ {
+		sc.Put(i, i*10)
+	}
+
+	if sc.Len() != 20 {
+		t.Fatalf("Len() = %d, want 20", sc.Len())
+	}
+
+	sc.Remove(5)
+	if sc.Len() != 19 {
+		t.Fatalf("after Remove Len() = %d, want 19", sc.Len())
+	}
+}
+
+func TestShardedRemove(t *testing.T) {
+	sc := NewSharded[string, int](100, 4, nil)
+	sc.Put("x", 42)
+
+	if ok := sc.Remove("x"); !ok {
+		t.Fatal("Remove('x') should return true")
+	}
+	if ok := sc.Remove("x"); ok {
+		t.Fatal("Remove('x') again should return false")
+	}
+	if _, ok := sc.Get("x"); ok {
+		t.Fatal("Get('x') should return false after Remove")
+	}
+}
+
+func TestShardedPeek(t *testing.T) {
+	sc := NewSharded[string, int](100, 4, nil)
+	sc.Put("k", 99)
+
+	v, ok := sc.Peek("k")
+	if !ok || v != 99 {
+		t.Fatalf("Peek('k') = %v, %v, want 99, true", v, ok)
+	}
+}
+
+func TestShardedConcurrent(t *testing.T) {
+	sc := NewSharded[int, int](1000, 16, nil)
+	var wg sync.WaitGroup
+
+	// 100 个 goroutine 并发写入
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			sc.Put(n, n*10)
+		}(i)
+	}
+	wg.Wait()
+
+	// 100 个 goroutine 并发读取
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			sc.Get(n)
+		}(i)
+	}
+	wg.Wait()
+
+	// 100 个 goroutine 混合操作
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			sc.Put(n+200, n)
+			sc.Get(n + 200)
+			sc.Peek(n + 200)
+			sc.Remove(n + 200)
+			sc.Len()
+			sc.Stats()
+		}(i)
+	}
+	wg.Wait()
+}
+
+func TestShardedStats(t *testing.T) {
+	sc := NewSharded[int, int](100, 4, nil)
+	sc.Put(1, 10)
+	sc.Put(2, 20)
+
+	sc.Get(1) // hit
+	sc.Get(2) // hit
+	sc.Get(3) // miss
+
+	s := sc.Stats()
+	if s.Hits != 2 {
+		t.Errorf("Hits = %d, want 2", s.Hits)
+	}
+	if s.Misses != 1 {
+		t.Errorf("Misses = %d, want 1", s.Misses)
+	}
+	if s.Size != 2 {
+		t.Errorf("Size = %d, want 2", s.Size)
+	}
+}
+
+func TestShardedResetStats(t *testing.T) {
+	sc := NewSharded[int, int](100, 4, nil)
+	sc.Put(1, 10)
+	sc.Get(1)
+	sc.Get(999)
+
+	sc.ResetStats()
+	s := sc.Stats()
+	if s.Hits != 0 || s.Misses != 0 {
+		t.Errorf("after reset: expected zeros, got %+v", s)
+	}
+}
+
+func TestShardedCustomHasher(t *testing.T) {
+	// 自定义哈希：所有 key 路由到分片 0
+	alwaysZero := func(_ string) uint64 { return 0 }
+	sc := NewSharded[string, int](100, 4, alwaysZero)
+
+	sc.Put("a", 1)
+	sc.Put("b", 2)
+
+	if v, ok := sc.Get("a"); !ok || v != 1 {
+		t.Fatalf("Get('a') = %v, %v, want 1, true", v, ok)
+	}
+	if v, ok := sc.Get("b"); !ok || v != 2 {
+		t.Fatalf("Get('b') = %v, %v, want 2, true", v, ok)
+	}
+}
+
+func TestShardedDefaultShardCount(t *testing.T) {
+	// shardCnt <= 0 应使用默认值
+	sc := NewSharded[string, int](100, 0, nil)
+	sc.Put("a", 1)
+	if v, ok := sc.Get("a"); !ok || v != 1 {
+		t.Fatalf("Get('a') = %v, %v, want 1, true", v, ok)
+	}
+
+	sc2 := NewSharded[string, int](100, -1, nil)
+	sc2.Put("b", 2)
+	if v, ok := sc2.Get("b"); !ok || v != 2 {
+		t.Fatalf("Get('b') = %v, %v, want 2, true", v, ok)
+	}
+}
+
+func TestShardedCapacityPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("NewSharded with capacity 0 should panic")
+		}
+	}()
+	NewSharded[string, int](0, 4, nil)
+}
+
+func TestShardedWithTTL(t *testing.T) {
+	sc := NewSharded[string, int](100, 4, nil, WithTTL(50*time.Millisecond))
+	sc.Put("k", 42)
+
+	time.Sleep(100 * time.Millisecond)
+
+	if _, ok := sc.Get("k"); ok {
+		t.Fatal("Get('k') should return false after TTL expiration")
+	}
+}
+
+func TestNextPowerOfTwo(t *testing.T) {
+	tests := []struct {
+		in, want int
+	}{
+		{0, 1}, {1, 1}, {2, 2}, {3, 4}, {4, 4},
+		{5, 8}, {7, 8}, {8, 8}, {9, 16}, {16, 16},
+		{17, 32}, {31, 32}, {32, 32}, {33, 64},
+	}
+	for _, tt := range tests {
+		if got := nextPowerOfTwo(tt.in); got != tt.want {
+			t.Errorf("nextPowerOfTwo(%d) = %d, want %d", tt.in, got, tt.want)
+		}
 	}
 }

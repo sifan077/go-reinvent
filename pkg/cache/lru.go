@@ -26,7 +26,7 @@ type LRU[K comparable, V any] struct {
 	head     *entry[K, V]       // 哨兵头，head.next 才是最近使用的节点
 	tail     *entry[K, V]       // 哨兵尾，tail.prev 才是最久未使用的节点
 	size     int
-	ttl      time.Duration      // 全局默认 TTL
+	ttl      time.Duration       // 全局默认 TTL
 	onEvict  EvictCallback[K, V] // 淘汰回调
 	stats    stats               // 访问统计（原子计数器）
 }
