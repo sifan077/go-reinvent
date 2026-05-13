@@ -33,3 +33,4 @@ cover.out
 tmp/
 temp/
 *.tmp
+/.claude/
