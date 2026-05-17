@@ -4,8 +4,10 @@
 package pool
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Pool 是协程池的通用接口。
@@ -136,6 +138,23 @@ func (p *FixedPool) TrySubmit(task func()) bool {
 	default:
 		return false
 	}
+}
+
+// SubmitWithTimeout 提交带超时的任务。
+// task 接收 context.Context，应监听 ctx.Done() 以响应超时。
+// timeout 从 worker 开始执行任务时计算，不是从提交时计算。
+// 返回 true 表示任务已入队，false 表示池已停止。
+// 注意：这是协作式取消，如果 task 不监听 ctx.Done()，worker 仍会被占用直到任务自行退出。
+func (p *FixedPool) SubmitWithTimeout(task func(ctx context.Context), timeout time.Duration) bool {
+	if p.stopped.Load() {
+		return false
+	}
+	p.taskCh <- func() {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		task(ctx)
+	}
+	return true
 }
 
 // Stop 优雅停止：关闭任务队列，等待所有已提交的任务执行完毕后退出。
